@@ -39,6 +39,7 @@ struct cb_explore_adf
   bool nounif;
   float lambda;
   uint64_t offset;
+  bool greedify;
 
   size_t counter;
 
@@ -161,9 +162,12 @@ void predict_or_learn_first(cb_explore_adf& data, base_learner& base, v_array<ex
     float prob = 1.f / (float)data.bag_size;
     bool test_sequence = test_adf_sequence(data.ec_seq) == nullptr;
     for (uint32_t i = 0; i < data.bag_size; i++) 
-      {
-		// avoid updates to the random num generator
-	uint32_t count = is_learn ? BS::weight_gen(*data.all) : 0;
+    {
+      // avoid updates to the random num generator
+      uint32_t count = is_learn ? BS::weight_gen(*data.all) : 0;
+      // for greedify, always update first policy once
+      if (is_learn && data.greedify && i == 0)
+        count = 1;
 	if (is_learn && count > 0 && !test_sequence)
 	  multiline_learn_or_predict<true>(base, examples, data.offset, i);
 	else
@@ -173,7 +177,7 @@ void predict_or_learn_first(cb_explore_adf& data, base_learner& base, v_array<ex
 	if (is_learn && !test_sequence)
 	  for (uint32_t j = 1; j < count; j++)
 	    multiline_learn_or_predict<true>(base, examples, data.offset, i);
-      }
+    }
     
     CB_EXPLORE::safety(data.action_probs, data.epsilon, true);
     qsort((void*) data.action_probs.begin(), data.action_probs.size(), sizeof(action_score), reverse_order);
@@ -468,6 +472,7 @@ base_learner* cb_explore_adf_setup(vw& all)
   ("psi", po::value<float>(), "disagreement parameter for cover")
   ("nounif", "do not explore uniformly on zero-probability actions in cover")
   ("softmax", "softmax exploration")
+  ("greedify", "always update first policy once in bagging")
   ("lambda", po::value<float>(), "parameter for softmax");
   add_options(all);
 
@@ -507,9 +512,12 @@ base_learner* cb_explore_adf_setup(vw& all)
   }
   else if (vm.count("bag"))
   { data.bag_size = (uint32_t)vm["bag"].as<size_t>();
+    data.greedify = vm.count("greedify") > 0;
     data.explore_type = BAG_EXPLORE;
     problem_multiplier = data.bag_size;
     *all.file_options << " --bag "<< data.bag_size;
+    if (data.greedify)
+      *all.file_options << " --greedify";
   }
   else if (vm.count("first"))
   { data.tau = (uint32_t)vm["first"].as<size_t>();
