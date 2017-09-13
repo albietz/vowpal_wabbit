@@ -47,6 +47,7 @@ struct cbify
   vw* all;
   bool use_adf; // if true, reduce to cb_explore_adf instead of cb_explore
   cbify_adf_data adf_data;
+  bool print_entropy;
 };
 
 vector<float> vw_scorer::Score_Actions(example& ctx)
@@ -111,6 +112,16 @@ void copy_example_to_adf(cbify& data, example& ec)
   }
 }
 
+double compute_entropy(const v_array<action_score>& a_s)
+{ double ent = 0.0;
+  for (size_t idx = 0; idx < a_s.size(); ++idx)
+  { const double p = a_s[idx].score;
+    if (p > 0 && p < 1)
+      ent -= p * log(p);
+  }
+  return ent;
+}
+
 template <bool is_learn>
 void predict_or_learn(cbify& data, base_learner& base, example& ec)
 { //Store the multiclass input label
@@ -122,6 +133,9 @@ void predict_or_learn(cbify& data, base_learner& base, example& ec)
   //Call the cb_explore algorithm. It returns a vector of probabilities for each action
   base.predict(ec);
   //data.probs = ec.pred.scalars;
+
+  if (data.print_entropy)
+    cout << compute_entropy(ec.pred.a_s) << endl;
 
   uint32_t action = data.mwt_explorer->Choose_Action(*data.generic_explorer, StringUtils::to_string(data.example_counter++), ec);
 
@@ -155,6 +169,8 @@ void predict_or_learn_adf(cbify& data, base_learner& base, example& ec)
   base.predict(*data.adf_data.empty_example);
   // get output scores
   auto& out_ec = data.adf_data.ecs[0];
+  if (data.print_entropy)
+    cout << compute_entropy(out_ec.pred.a_s) << endl;
   uint32_t idx = data.mwt_explorer->Choose_Action(
       *data.generic_explorer,
       StringUtils::to_string(data.example_counter++), out_ec) - 1;
@@ -196,12 +212,16 @@ base_learner* cbify_setup(vw& all)
 { //parse and set arguments
   if (missing_option<size_t, true>(all, "cbify", "Convert multiclass on <k> classes into a contextual bandit problem"))
     return nullptr;
+  new_options(all, "CBIFY options")
+  ("print_entropy", "print entropy of exploration distribution to stdout");
+  add_options(all);
 
   po::variables_map& vm = all.vm;
   uint32_t num_actions = (uint32_t)vm["cbify"].as<size_t>();
 
   cbify& data = calloc_or_throw<cbify>();
   data.use_adf = count(all.args.begin(), all.args.end(),"--cb_explore_adf") > 0;
+  data.print_entropy = vm.count("print_entropy") > 0;
   data.recorder = new vw_recorder();
   data.mwt_explorer = new MwtExplorer<example>("vw",*data.recorder);
   data.scorer = new vw_scorer();
