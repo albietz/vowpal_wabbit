@@ -48,6 +48,8 @@ struct cbify
   bool use_adf; // if true, reduce to cb_explore_adf instead of cb_explore
   cbify_adf_data adf_data;
   bool print_entropy;
+  float loss0;
+  float loss1;
 };
 
 vector<float> vw_scorer::Score_Actions(example& ctx)
@@ -57,11 +59,11 @@ vector<float> vw_scorer::Score_Actions(example& ctx)
   return probs_vec;
 }
 
-float loss(uint32_t label, uint32_t final_prediction)
+float loss(cbify& data, uint32_t label, uint32_t final_prediction)
 { if (label != final_prediction)
-    return 1.;
+    return data.loss1;
   else
-    return 0.;
+    return data.loss0;
 }
 
 template<class T> inline void delete_it(T* p) { if (p != nullptr) delete p; }
@@ -145,7 +147,7 @@ void predict_or_learn(cbify& data, base_learner& base, example& ec)
 
   if(!cl.action)
     THROW("No action with non-zero probability found!");
-  cl.cost = loss(ld.label, cl.action);
+  cl.cost = loss(data, ld.label, cl.action);
 
   //Create a new cb label
   data.cb_label.costs.push_back(cl);
@@ -181,7 +183,7 @@ void predict_or_learn_adf(cbify& data, base_learner& base, example& ec)
 
   if(!cl.action)
     THROW("No action with non-zero probability found!");
-  cl.cost = loss(ld.label, cl.action);
+  cl.cost = loss(data, ld.label, cl.action);
 
   // add cb label to chosen action
   auto& lab = data.adf_data.ecs[cl.action - 1].l.cb;
@@ -213,6 +215,8 @@ base_learner* cbify_setup(vw& all)
   if (missing_option<size_t, true>(all, "cbify", "Convert multiclass on <k> classes into a contextual bandit problem"))
     return nullptr;
   new_options(all, "CBIFY options")
+  ("loss0", po::value<float>(), "loss for correct label")
+  ("loss1", po::value<float>(), "loss for incorrect label")
   ("print_entropy", "print entropy of exploration distribution to stdout");
   add_options(all);
 
@@ -222,6 +226,8 @@ base_learner* cbify_setup(vw& all)
   cbify& data = calloc_or_throw<cbify>();
   data.use_adf = count(all.args.begin(), all.args.end(),"--cb_explore_adf") > 0;
   data.print_entropy = vm.count("print_entropy") > 0;
+  data.loss0 = vm.count("loss0") ? vm["loss0"].as<float>() : 0.f;
+  data.loss1 = vm.count("loss1") ? vm["loss1"].as<float>() : 1.f;
   data.recorder = new vw_recorder();
   data.mwt_explorer = new MwtExplorer<example>("vw",*data.recorder);
   data.scorer = new vw_scorer();
