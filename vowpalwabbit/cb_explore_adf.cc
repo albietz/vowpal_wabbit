@@ -190,6 +190,10 @@ template <bool is_learn>
 void predict_or_learn_cover(cb_explore_adf& data, base_learner& base, v_array<example*>& examples)
 { //Randomize over predictions from a base set of predictors
   //Use cost sensitive oracle to cover actions to form distribution.
+
+  const uint32_t shared = CB::ec_is_example_header(*examples[0]) ? 1 : 0;
+  const bool is_mtr = data.gen_cs.cb_type == CB_TYPE_MTR;
+
   if (is_learn)
   { GEN_CS::gen_cs_example<false>(data.gen_cs, examples, data.cs_labels);
     multiline_learn_or_predict<true>(base, examples, data.offset);
@@ -200,36 +204,73 @@ void predict_or_learn_cover(cb_explore_adf& data, base_learner& base, v_array<ex
   }
 
   v_array<action_score>& preds = examples[0]->pred.a_s;
-  uint32_t num_actions = (uint32_t)preds.size();
+  uint32_t action = preds[0].action;
+
+  const uint32_t num_actions = (uint32_t)preds.size();
+  const float min_prob = min(1.f / num_actions, 1.f / (float)sqrt(data.counter * num_actions));
+  static vector<float> weights;
+  weights.resize(num_actions);
+  static vector<float> a_scores;
+  a_scores.resize(num_actions);
 
   float additive_probability = 1.f / (float)data.cover_size;
-  float min_prob = min(1.f / num_actions, 1.f / (float)sqrt(data.counter * num_actions));
   v_array<action_score>& probs = data.action_probs;
   probs.erase();
   for(uint32_t i = 0; i < num_actions; i++)
     probs.push_back({i,0.});
 
-  probs[preds[0].action].score += additive_probability;
-
-  uint32_t shared = CB::ec_is_example_header(*examples[0]) ? 1 : 0;
+  probs[action].score += additive_probability;
 
   float norm = min_prob * num_actions + (additive_probability - min_prob);
   for (size_t i = 1; i < data.cover_size; i++)
   { //Create costs of each action based on online cover
     if (is_learn)
-    { data.cs_labels_2.costs.erase();
+    { if (is_mtr) // for MTR, do a standard MTR update + CS update only for the disagreement part
+      { multiline_learn_or_predict<true>(base, examples, data.offset, i+1);
+        // action = preds[0].action; // get predicted action before update
+        for (const auto& as : preds) {
+          a_scores[as.action] = as.score;
+        }
+      }
+      // CS update
+      data.cs_labels_2.costs.erase();
       if (shared > 0)
         data.cs_labels_2.costs.push_back(data.cs_labels.costs[0]);
       for (uint32_t j = 0; j < num_actions; j++)
-      { float pseudo_cost = data.cs_labels.costs[j+shared].x - data.psi * min_prob / (max(probs[j].score, min_prob) / norm);
+      { float pseudo_cost;
+        if (is_mtr)
+        { pseudo_cost = - min_prob / (max(probs[j].score, min_prob) / norm);
+          weights[j] = examples[j + shared]->weight;
+          examples[j + shared]->weight *= data.psi;
+        }
+        else
+        { pseudo_cost = data.cs_labels.costs[j+shared].x - data.psi * min_prob / (max(probs[j].score, min_prob) / norm);
+        }
         data.cs_labels_2.costs.push_back({pseudo_cost,j,0.,0.});
       }
-      GEN_CS::call_cs_ldf<true>(*(data.cs_ldf_learner), examples, data.cb_labels, data.cs_labels_2, data.prepped_cs_labels, data.offset, i+1);
+      // GEN_CS::call_cs_ldf<true>(*(data.cs_ldf_learner), examples, data.cb_labels, data.cs_labels_2, data.prepped_cs_labels, data.offset, i+1);
+      GEN_CS::call_cs_ldf<true>(*(data.cs_ldf_learner), examples, data.cb_labels, data.cs_labels_2, data.prepped_cs_labels, data.offset, i + data.cover_size);
+      if (!is_mtr) // get predicted action (already done above for MTR)
+      { action = preds[0].action;
+      }
+      if (is_mtr) // reset importance weights
+      { for (size_t j = 0; j < num_actions; ++j)
+          examples[j + shared]->weight = weights[j];
+        float best_score = -FLT_MAX;
+        for (auto& as : preds) {
+          if (a_scores[as.action] + as.score > best_score) {
+            best_score = a_scores[as.action] + as.score;
+            action = as.action;
+          }
+        }
+      }
     }
     else
-      GEN_CS::call_cs_ldf<false>(*(data.cs_ldf_learner), examples, data.cb_labels, data.cs_labels, data.prepped_cs_labels, data.offset, i+1);
+    { GEN_CS::call_cs_ldf<false>(*(data.cs_ldf_learner), examples, data.cb_labels, data.cs_labels, data.prepped_cs_labels, data.offset, i+1);
+      action = preds[0].action;
+    }
 
-    uint32_t action = preds[0].action;
+
     if (probs[action].score < min_prob)
       norm += max(0, additive_probability - (min_prob - probs[action].score));
     else
@@ -496,7 +537,8 @@ base_learner* cb_explore_adf_setup(vw& all)
   if (vm.count("cover"))
   { data.cover_size = (uint32_t)vm["cover"].as<size_t>();
     data.explore_type = COVER;
-    problem_multiplier = data.cover_size+1;
+    // problem_multiplier = data.cover_size+1;
+    problem_multiplier = 2 * data.cover_size; // for MTR: 0, _, 1, .., C-1, 1', .., C-1'
     *all.file_options << " --cover " << data.cover_size;
 
     data.psi = 1.0f;
@@ -558,12 +600,10 @@ base_learner* cb_explore_adf_setup(vw& all)
     else if (type_string.compare("ips") == 0)
       data.gen_cs.cb_type = CB_TYPE_IPS;
     else if (type_string.compare("mtr") == 0)
-      if (vm.count("cover"))
-      { all.trace_message << "warning: cover and mtr are not simultaneously supported yet, defaulting to ips" << endl;
-        data.gen_cs.cb_type = CB_TYPE_IPS;
-      }
-      else
-        data.gen_cs.cb_type = CB_TYPE_MTR;
+    { if (vm.count("cover"))
+        all.trace_message << "warning: mtr support for cover is currently experimental." << endl;
+      data.gen_cs.cb_type = CB_TYPE_MTR;
+    }
     else
       all.trace_message << "warning: cb_type must be in {'ips','dr'}; resetting to ips." << std::endl;
   }
