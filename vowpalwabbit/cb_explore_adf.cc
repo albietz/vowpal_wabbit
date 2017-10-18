@@ -21,6 +21,8 @@ using namespace CB_ALGS;
 #define SOFTMAX 3
 //cover
 #define COVER 4
+//agree
+#define AGREE 5
 
 namespace CB_EXPLORE_ADF
 {
@@ -38,9 +40,11 @@ struct cb_explore_adf
   size_t cover_size;
   float psi;
   bool nounif;
+  bool nounifagree;
   float lambda;
   uint64_t offset;
   bool greedify;
+  float agree_c0;
 
   size_t counter;
 
@@ -108,6 +112,107 @@ example* test_adf_sequence(v_array<example*>& ec_seq)
     THROW("cb_adf: badly formatted example, only one line can have a cost");
 }
 
+void get_disagree_weights_cs(std::vector<float>& weights, cb_explore_adf& data, base_learner& base, v_array<example*>& examples)
+{
+  const bool shared = CB::ec_is_example_header(*examples[0]);
+  const size_t num_actions = examples[0]->pred.a_s.size();
+  static std::vector<ACTION_SCORE::action_scores> ex_as;
+  static std::vector<v_array<CB::cb_class>> ex_costs;
+  // for each action, sensitivity with label=min and max
+  static std::vector<pair<float, float>> sensitivities;
+  ex_as.clear();
+  ex_costs.clear();
+  sensitivities.resize(num_actions);
+
+  for (auto ex : examples)
+  { ex_as.push_back(ex->pred.a_s);
+    ex_costs.push_back(ex->l.cb.costs);
+  }
+  float min_score = FLT_MAX;
+  float max_score = -FLT_MAX;
+  for (auto as : ex_as[0])
+  { if (as.score < min_score) min_score = as.score;
+    if (as.score > max_score) max_score = as.score;
+    // set regressor prediction
+    examples[shared + as.action]->pred.scalar = as.score;
+  }
+  min_score = 0; //TODO(alberto): adapt to observed costs somehow
+  max_score = 1;
+
+  // compute sensitivities
+  for (size_t a = 0; a < num_actions; ++a)
+  { example* ec = examples[shared + a];
+    ec->l.simple.label = min_score;
+    sensitivities[a].first = base.sensitivity(*ec);
+    ec->l.simple.label = max_score;
+    sensitivities[a].second = base.sensitivity(*ec);
+  }
+
+  // compute importance weights
+  weights.resize(num_actions);
+  for (size_t a_ref = 0; a_ref < num_actions; ++a_ref)
+  { float max_weight = -FLT_MAX;
+    float s = sensitivities[a_ref].first;
+    float y = examples[shared + a_ref]->pred.scalar;
+    for (size_t a = 0; a < num_actions; ++a)
+    { if (a == a_ref) continue;
+      float w = (y - examples[shared + a]->pred.scalar) / (s + sensitivities[a].second);
+      if (w > max_weight) max_weight = w;
+    }
+    weights[a_ref] = max_weight * max_score / data.counter;
+  }
+
+  // reset examples
+  for (size_t i = 0; i < examples.size(); ++i)
+  { examples[i]->pred.a_s = ex_as[i];
+    examples[i]->l.cb.costs = ex_costs[i];
+  }
+}
+
+void get_disagree_weights_mtr(std::vector<float>& weights, cb_explore_adf& data, base_learner& base, v_array<example*>& examples)
+{
+  const bool shared = CB::ec_is_example_header(*examples[0]);
+  const size_t num_actions = examples[0]->pred.a_s.size();
+  static std::vector<ACTION_SCORE::action_scores> ex_as;
+  static std::vector<v_array<CB::cb_class>> ex_costs;
+  ex_as.clear();
+  ex_costs.clear();
+
+  for (auto& ex : examples)
+  { ex_as.push_back(ex->pred.a_s);
+    ex_costs.push_back(ex->l.cb.costs);
+  }
+  float min_score = FLT_MAX;
+  for (auto as : ex_as[0])
+  { if (as.score < min_score) min_score = as.score;
+    // set regressor prediction
+    examples[shared + as.action]->pred.scalar = as.score;
+  }
+  min_score = 0.;
+
+  // compute importance weights
+  weights.resize(num_actions);
+  for (size_t a_ref = 0; a_ref < num_actions; ++a_ref)
+  { example* ec = examples[shared + a_ref];
+    ec->l.simple.label = min_score;
+    weights[a_ref] = (examples[shared + a_ref]->pred.scalar - min_score) / base.sensitivity(*ec);
+    weights[a_ref] *= examples[shared + a_ref]->pred.scalar / data.counter;
+  }
+
+  // reset examples
+  for (size_t i = 0; i < examples.size(); ++i)
+  { examples[i]->pred.a_s = ex_as[i];
+    examples[i]->l.cb.costs = ex_costs[i];
+  }
+}
+
+void get_disagree_weights(std::vector<float>& weights, cb_explore_adf& data, base_learner& base, v_array<example*>& examples)
+{ if (data.gen_cs.cb_type == CB_TYPE_MTR)
+    get_disagree_weights_mtr(weights, data, base, examples);
+  else
+    get_disagree_weights_cs(weights, data, base, examples);
+}
+
 template <bool is_learn>
 void predict_or_learn_first(cb_explore_adf& data, base_learner& base, v_array<example*>& examples)
 {
@@ -144,15 +249,44 @@ void predict_or_learn_greedy(cb_explore_adf& data, base_learner& base, v_array<e
     multiline_learn_or_predict<true>(base, examples, data.offset);
   else
     multiline_learn_or_predict<false>(base, examples, data.offset);
+  
+  static std::vector<float> weights;
+  if (data.nounifagree)
+    get_disagree_weights(weights, data, base, examples);
 
   v_array<action_score>& preds = examples[0]->pred.a_s;
   uint32_t num_actions = (uint32_t)preds.size();
-  float prob = data.epsilon/(float)num_actions;
-  for (size_t i = 0; i < num_actions; i++)
-    preds[i].score = prob;
+  if (data.nounifagree)
+  {
+    size_t support_size = 0;
+    ++data.counter;
+    const float threshold = data.agree_c0 / (float)sqrt(data.counter * num_actions);
+    for (size_t i = 0; i < num_actions; ++i)
+    {
+      if (weights[preds[i].action] > threshold)
+        preds[i].score = 0;
+      else
+      {
+        preds[i].score = 1;
+        ++support_size;
+      }
+    }
+    float prob = data.epsilon / support_size;
+    for (size_t i = 0; i < num_actions; ++i)
+    {
+      if (preds[i].score > 0)
+        preds[i].score = prob;
+    }
+  }
+  else
+  {
+    float prob = data.epsilon/(float)num_actions;
+    for (size_t i = 0; i < num_actions; i++)
+      preds[i].score = prob;
+  }
   preds[0].score += 1.f - data.epsilon;
 }
-
+  
 template <bool is_learn>
 void predict_or_learn_bag(cb_explore_adf& data, base_learner& base, v_array<example*>& examples)
 {
@@ -218,6 +352,11 @@ void predict_or_learn_cover(cb_explore_adf& data, base_learner& base, v_array<ex
     multiline_learn_or_predict<false>(base, examples, data.offset);
   }
 
+  static std::vector<float> weights;
+  if (data.nounifagree)
+  { get_disagree_weights(weights, data, base, examples);
+  }
+
   v_array<action_score>& preds = examples[0]->pred.a_s;
   const uint32_t num_actions = (uint32_t)preds.size();
 
@@ -259,7 +398,16 @@ void predict_or_learn_cover(cb_explore_adf& data, base_learner& base, v_array<ex
     probs[action].score += additive_probability;
   }
 
-  CB_EXPLORE::safety(data.action_probs, min_prob * num_actions, !data.nounif);
+  if (data.nounifagree)
+  { const float threshold = data.agree_c0 / (float)sqrt((data.counter + 1) * num_actions);
+    for (size_t i = 0; i < num_actions; ++i)
+    { if (probs[i].score == 0 && weights[probs[i].action] <= threshold)
+        probs[i].score = 1e-8; // set to non-zero so that safety call will set to epsilon
+    }
+    CB_EXPLORE::safety(data.action_probs, min_prob * num_actions, /*zeros=*/false);
+  }
+  else
+    CB_EXPLORE::safety(data.action_probs, min_prob * num_actions, !data.nounif);
 
   qsort((void*) probs.begin(), probs.size(), sizeof(action_score), reverse_order);
   for (size_t i = 0; i < num_actions; i++)
@@ -293,6 +441,33 @@ void predict_or_learn_softmax(cb_explore_adf& data, base_learner& base, v_array<
   for (size_t i = 0; i < num_actions; i++)
     preds[i].score /= norm;
   CB_EXPLORE::safety(preds, data.epsilon, true);
+}
+
+template <bool is_learn>
+void predict_or_learn_agree(cb_explore_adf& data, base_learner& base, v_array<example*>& examples)
+{
+  if (is_learn && test_adf_sequence(data.ec_seq) != nullptr)
+    multiline_learn_or_predict<true>(base, examples, data.offset);
+  else
+    multiline_learn_or_predict<false>(base, examples, data.offset);
+
+  static std::vector<float> weights;
+  get_disagree_weights(weights, data, base, examples);
+  ++data.counter;
+  ACTION_SCORE::action_scores& preds = examples[0]->pred.a_s;
+  const size_t num_actions = preds.size();
+  const float threshold = data.agree_c0 / (float)sqrt(data.counter * num_actions);
+  for (size_t i = 0; i < preds.size(); ++i)
+  { // cout << weights[preds[i].action] << " ";
+    if (weights[preds[i].action] > threshold)
+      preds[i].score = 0; // do not explore if disagreeing on this
+    else
+      preds[i].score = 1;
+  }
+  preds[0].score = 1; // always explore erm action
+  // cout << "(weights)\n";
+
+  CB_EXPLORE::safety(preds, 1.0, /*zeros=*/false);
 }
 
 void end_examples(cb_explore_adf& data)
@@ -429,6 +604,9 @@ void do_actual_learning(cb_explore_adf& data, base_learner& base)
     case COVER:
       predict_or_learn_cover<false>(data, base, data.ec_seq);
       break;
+    case AGREE:
+      predict_or_learn_agree<false>(data, base, data.ec_seq);
+      break;
     default:
       THROW("Unknown explorer type specified for contextual bandit learning: " << data.explore_type);
     }
@@ -459,6 +637,9 @@ void do_actual_learning(cb_explore_adf& data, base_learner& base)
       break;
     case COVER:
       predict_or_learn_cover<is_learn>(data, base, data.ec_seq);
+      break;
+    case AGREE:
+      predict_or_learn_agree<is_learn>(data, base, data.ec_seq);
       break;
     default:
       THROW("Unknown explorer type specified for contextual bandit learning: " << data.explore_type);
@@ -518,7 +699,10 @@ base_learner* cb_explore_adf_setup(vw& all)
   ("bag", po::value<size_t>(), "bagging-based exploration")
   ("cover",po::value<size_t>() ,"Online cover based exploration")
   ("psi", po::value<float>(), "disagreement parameter for cover")
+  ("agree", "Agreement exploration")
+  ("agree_mellowness", po::value<float>(), "Agreement exploration threshold parameter c_0")
   ("nounif", "do not explore uniformly on zero-probability actions in cover")
+  ("nounifagree", "do not explore uniformly on actions that d")
   ("softmax", "softmax exploration")
   ("greedify", "always update first policy once in bagging")
   ("lambda", po::value<float>(), "parameter for softmax");
@@ -542,6 +726,16 @@ base_learner* cb_explore_adf_setup(vw& all)
     sprintf(type_string, "%f", data.epsilon);
     *all.file_options << " --epsilon "<<type_string;
   }
+  if (vm.count("nounifagree"))
+  { data.nounifagree = true;
+    *all.file_options << " --nounifagree";
+  }
+  data.agree_c0 = 0.1;
+  if (vm.count("agree_mellowness"))
+  { data.agree_c0 = vm["agree_mellowness"].as<float>();
+    sprintf(type_string, "%f", data.agree_c0);
+    *all.file_options << " --agree_mellowness "<<type_string;
+  }
   if (vm.count("cover"))
   {
     data.cover_size = (uint32_t)vm["cover"].as<size_t>();
@@ -559,6 +753,12 @@ base_learner* cb_explore_adf_setup(vw& all)
     {
       data.nounif = true;
       *all.file_options << " --nounif";
+    }
+    if (data.nounifagree && vm.count("agree_mellowness") == 0)
+    { // c0 = psi by default unless explicitly provided
+      data.agree_c0 = data.psi;
+      sprintf(type_string, "%f", data.agree_c0);
+      *all.file_options << " --agree_mellowness "<<type_string;
     }
   }
   else if (vm.count("bag"))
@@ -585,6 +785,10 @@ base_learner* cb_explore_adf_setup(vw& all)
     data.explore_type = SOFTMAX;
     sprintf(type_string, "%f", data.lambda);
     *all.file_options << " --softmax --lambda "<<type_string;
+  }
+  else if (vm.count("agree"))
+  { data.explore_type = AGREE;
+    *all.file_options << " --agree";
   }
   else if (vm.count("epsilon"))
     data.explore_type = EPS_GREEDY;
