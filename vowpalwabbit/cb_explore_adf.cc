@@ -309,20 +309,21 @@ void predict_or_learn_bag(cb_explore_adf& data, base_learner& base, v_array<exam
   bool test_sequence = test_adf_sequence(data.ec_seq) == nullptr;
   for (uint32_t i = 0; i < data.bag_size; i++)
   {
+    const uint32_t id = (i == 0) ? i : i + 1; // skip DR policy
     // avoid updates to the random num generator
     // for greedify, always update first policy once
     uint32_t count = is_learn
                      ? ((data.greedify && i == 0) ? 1 : BS::weight_gen(*data.all))
                      : 0;
     if (is_learn && count > 0 && !test_sequence)
-      multiline_learn_or_predict<true>(base, examples, data.offset, i);
+      multiline_learn_or_predict<true>(base, examples, data.offset, id);
     else
-      multiline_learn_or_predict<false>(base, examples, data.offset, i);
+      multiline_learn_or_predict<false>(base, examples, data.offset, id);
     assert(preds.size() == num_actions);
     data.action_probs[preds[0].action].score += prob;
     if (is_learn && !test_sequence)
       for (uint32_t j = 1; j < count; j++)
-        multiline_learn_or_predict<true>(base, examples, data.offset, i);
+        multiline_learn_or_predict<true>(base, examples, data.offset, id);
   }
 
   CB_EXPLORE::safety(data.action_probs, data.epsilon, true);
@@ -766,7 +767,7 @@ base_learner* cb_explore_adf_setup(vw& all)
     data.bag_size = (uint32_t)vm["bag"].as<size_t>();
     data.greedify = vm.count("greedify") > 0;
     data.explore_type = BAG_EXPLORE;
-    problem_multiplier = data.bag_size;
+    problem_multiplier = data.bag_size + 1;
     *all.file_options << " --bag "<< data.bag_size;
     if (data.greedify)
       *all.file_options << " --greedify";
