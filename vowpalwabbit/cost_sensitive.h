@@ -29,6 +29,9 @@ struct label
 };
 
 void output_example(vw& all, example& ec);
+void finish_example(vw& all, example& ec);
+template <class T> void finish_example(vw& all, T&, example& ec) { finish_example(all, ec); }
+
 extern label_parser cs_label;
 
 bool is_test_label(label& ld);

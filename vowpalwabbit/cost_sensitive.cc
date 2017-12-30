@@ -270,7 +270,9 @@ void output_example(vw& all, example& ec)
     if (chosen_loss == FLT_MAX)
       cerr << "warning: csoaa predicted an invalid class. Are all multi-class labels in the {1..k} range?" << endl;
 
-    loss = chosen_loss - min;
+    // TODO(alberto): add option somewhere to allow using the latter?
+    // loss = chosen_loss - min;
+    loss = chosen_loss;
   }
 
   all.sd->update(ec.test_only, !is_test_label(ld), loss, 1.f, ec.num_features);
@@ -297,6 +299,12 @@ void output_example(vw& all, example& ec)
   }
 
   print_update(all, is_test_label(ec.l.cs), ec, nullptr, false, ec.pred.multiclass);
+}
+
+void finish_example(vw& all, example& ec)
+{
+  output_example(all, ec);
+  VW::finish_example(all, &ec);
 }
 
 bool example_is_test(example& ec)

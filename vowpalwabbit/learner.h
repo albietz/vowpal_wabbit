@@ -297,5 +297,16 @@ init_multiclass_learner(T* dat, base_learner* base,
   return l;
 }
 
+template<class T> learner<T>&
+init_cost_sensitive_learner(T* dat, base_learner* base,
+                            void (*learn)(T&, base_learner&, example&),
+                            void (*predict)(T&, base_learner&, example&), parser* p, size_t ws,
+                            prediction_type::prediction_type_t pred_type = prediction_type::multiclass)
+{ learner<T>& l = init_learner(dat,base,learn,predict,ws,pred_type);
+  l.set_finish_example(COST_SENSITIVE::finish_example);
+  p->lp = COST_SENSITIVE::cs_label;
+  return l;
+}
+
 template<class T> base_learner* make_base(learner<T>& base) { return (base_learner*)&base; }
 }
