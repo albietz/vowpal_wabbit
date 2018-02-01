@@ -461,6 +461,8 @@ vw::vw()
   sd->is_more_than_two_labels_observed = false;
   sd->max_label = 0;
   sd->min_label = 0;
+  sd->max_cb_cost = 1;
+  sd->min_cb_cost = 0;
 
   p = new_parser();
   p->emptylines_separate_examples = false;
@@ -491,6 +493,7 @@ vw::vw()
   num_children = 10;
   save_resume = false;
   preserve_performance_counters = false;
+  nounifagree = false;
 
   random_positive_weights = false;
 

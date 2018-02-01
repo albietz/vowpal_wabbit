@@ -272,6 +272,9 @@ base_learner* cbify_setup(vw& all)
   data.generic_explorer = new GenericExplorer<example>(*data.scorer, (u32)num_actions);
   data.all = &all;
 
+  all.sd->max_cb_cost = data.loss1;
+  all.sd->min_cb_cost = data.loss0;
+
   const bool use_cs = vm.count("cbify_cs") > 0;
 
   if (data.use_adf)

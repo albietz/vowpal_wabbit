@@ -216,6 +216,9 @@ struct shared_data
   float min_label;//minimum label encountered
   float max_label;//maximum label encountered
 
+  float min_cb_cost;
+  float max_cb_cost;
+
   namedlabels* ldict;
 
   //for holdout
@@ -560,6 +563,7 @@ struct vw
   bool do_reset_source;
   bool holdout_set_off;
   bool early_terminate;
+  bool nounifagree;
   uint32_t holdout_period;
   uint32_t holdout_after;
   size_t check_holdout_every_n_passes;  // default: 1, but search might want to set it higher if you spend multiple passes learning a single policy

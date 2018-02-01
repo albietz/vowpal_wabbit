@@ -39,6 +39,8 @@ struct cb_to_cs_adf
   COST_SENSITIVE::label pred_scores;
   CB::cb_class known_cost;
   LEARNER::base_learner* scorer;
+
+  vw* all;
 };
 
 CB::cb_class* get_observed_cost(CB::label& ld);
@@ -197,8 +199,20 @@ void gen_cs_example_dr(cb_to_cs_adf& c, v_array<example*> examples, COST_SENSITI
       wc.x = CB_ALGS::get_cost_pred<is_learn>(c.scorer, &(c.known_cost), *(examples[i]), 0, 2);
       c.known_cost.action = known_index;
     }
+    /*else if (c.all->nounifagree && i >= startK && examples[i]->l.cb.costs.size() > 0) // e.g. for imputed losses with nounifagree
+    {
+      wc.x = examples[i]->l.cb.costs[0].cost;
+    }*/
+    else if (c.all->nounifagree && examples[i]->l.cb.costs.size() == 1 && examples[i]->l.cb.costs[0].probability == 0)
+    {
+      wc.x = examples[i]->l.cb.costs[0].cost;
+      // std::cout << "a:";
+    }
     else
+    {
       wc.x = CB_ALGS::get_cost_pred<is_learn>(c.scorer, nullptr, *(examples[i]), 0, 2);
+    }
+    // std::cout << wc.x << " ";
 
     if (shared)
       wc.class_index = (uint32_t)i - 1;
@@ -211,6 +225,7 @@ void gen_cs_example_dr(cb_to_cs_adf& c, v_array<example*> examples, COST_SENSITI
       wc.x += (c.known_cost.cost - wc.x) / c.known_cost.probability;
     cs_labels.costs.push_back(wc);
   }
+  // std::cout << std::endl;
 
   if (shared)//take care of shared examples
   { cs_labels.costs[0].class_index = 0;

@@ -53,10 +53,17 @@ void gen_cs_example_ips(v_array<example*> examples, COST_SENSITIVE::label& cs_la
     COST_SENSITIVE::wclass wc = {0.,i,0.,0.};
     if (shared && i > 0)
       wc.class_index = (uint32_t)i-1;
-    if (ld.costs.size() == 1 && ld.costs[0].cost != FLT_MAX)
+    if (ld.costs.size() == 1 && ld.costs[0].cost != FLT_MAX && ld.costs[0].probability > 0)
       wc.x = ld.costs[0].cost / safe_probability(ld.costs[0].probability);
+    else if (ld.costs.size() == 1 && ld.costs[0].cost != FLT_MAX && ld.costs[0].probability == 0)
+    {
+      wc.x = ld.costs[0].cost; // nounifagree imputed losses
+      // std::cout << "a:";
+    }
+    // std::cout << wc.x << " ";
     cs_labels.costs.push_back(wc);
   }
+  // std::cout << std::endl;
 
   if (shared)//take care of shared examples
   {

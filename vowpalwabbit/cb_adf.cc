@@ -139,10 +139,13 @@ bool test_adf_sequence(cb_adf& data)
   }
   if (count == 0)
     return true;
-  else if (count == 1)
+  else if (count == 1 || (data.all->nounifagree && count > 1))
     return false;
   else
+  {
+    cout << "active: " << data.all->active << endl;
     THROW("cb_adf: badly formatted example, only one line can have a cost");
+  }
 }
 
 template <bool is_learn>
@@ -394,6 +397,7 @@ base_learner* cb_adf_setup(vw& all)
   cb_adf& ld = calloc_or_throw<cb_adf>();
 
   ld.all = &all;
+  ld.gen_cs.all = &all;
 
   // number of weight vectors needed
   size_t problem_multiplier = 1;//default for IPS

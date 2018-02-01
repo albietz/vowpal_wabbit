@@ -632,15 +632,25 @@ private:
 
     float sum = 0.f;
     float action_probability = 0.f;
-    u32 action_index = num_weights - 1;
+    u32 action_index = 0;
     for (u32 i = 0; i < num_weights; i++)
-    { weights[i] = weights[i] / total;
+    {
+      if (weights[i] == 0)
+        continue;
+      weights[i] = weights[i] / total;
       sum += weights[i];
+      action_index = i;
       if (sum > draw)
-      { action_index = i;
-        action_probability = weights[i];
         break;
-      }
+    }
+    action_probability = weights[action_index];
+    if (action_probability == 0)
+    {
+      std::cout << "0 probability action!\n";
+      for (u32 i = 0; i < num_weights; ++i)
+        std::cout << weights[i] << " ";
+      std::cout << std::endl;
+      throw std::invalid_argument("error with probabilities");
     }
 
     // action id is one-based
