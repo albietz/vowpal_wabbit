@@ -69,6 +69,8 @@ struct baseline
   bool global_only; // only use a global constant for the baseline
   bool global_initialized;
   bool check_enabled; // only use baseline when the example contains enabled flag
+
+  base_learner* baseline_base; // HACK to identify base...
 };
 
 void init_global(baseline& data)
@@ -159,6 +161,38 @@ void predict_or_learn(baseline& data, base_learner& base, example& ec)
   }
 }
 
+float sensitivity(baseline& data, base_learner& base, example& ec)
+{
+  // cout << "here " << &base << endl;
+  // check if we're at the right level of the hierarchy.. (HACK)
+  if (data.baseline_base != &base)
+  {
+    // cout << "going down" << endl;
+    return base.sensitivity(ec);
+  }
+  // no baseline if check_enabled is true and example contains flag
+  if (data.check_enabled && !BASELINE::baseline_enabled(&ec))
+    return base.sensitivity(ec);
+
+  if (!data.global_only)
+    THROW("sensitivity for baseline without --global_only not implemented");
+
+  // sensitivity of baseline term
+  VW::copy_example_metadata(/*audit=*/false, data.ec, &ec);
+  data.ec->l.simple.label = ec.l.simple.label;
+  data.ec->pred.scalar = ec.pred.scalar;
+  // cout << "before base" << endl;
+  const float baseline_sens = base.sensitivity(*data.ec);
+  // cout << "base sens: " << baseline_sens << endl;
+
+  // sensitivity of residual
+  base.predict(*data.ec);
+  ec.l.simple.initial = data.ec->pred.scalar;
+  const float sens = base.sensitivity(ec);
+  // cout << " residual sens: " << sens << endl;
+  return baseline_sens + sens;
+}
+
 void finish(baseline& data)
 {
   VW::dealloc_example(simple_label.delete_label, *data.ec);
@@ -191,6 +225,8 @@ base_learner* baseline_setup(vw& all)
   base_learner* base = setup_base(all);
   learner<baseline>& l = init_learner(&data, base, predict_or_learn<true>, predict_or_learn<false>);
 
+  data.baseline_base = base;
+  l.set_sensitivity(sensitivity);
   l.set_finish(finish);
 
   return make_base(l);
