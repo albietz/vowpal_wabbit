@@ -292,6 +292,7 @@ void get_cost_ranges(std::vector<float> &min_costs,
     example* ec = examples[shared + a];
     ec->l.simple.label = cmin;
     float sens = base.sensitivity(*ec);
+    // cout << sens << endl;
     float w = 0; // importance weight
 
     if (ec->pred.scalar < cmin || nanpattern(sens) || infpattern(sens))
@@ -310,6 +311,7 @@ void get_cost_ranges(std::vector<float> &min_costs,
     {
       ec->l.simple.label = cmax;
       sens = base.sensitivity(*ec);
+    // cout << sens << endl;
       if (ec->pred.scalar > cmax || nanpattern(sens) || infpattern(sens))
       {
         max_costs[a] = cmax;
@@ -527,11 +529,13 @@ void predict_or_learn_regcb(cb_explore_adf& data, base_learner& base, v_array<ex
       }
       for (size_t i = 0; i < preds.size(); ++i)
       {
-        if (preds[i].action == a_opt)
+        if (preds[i].action == a_opt || data.min_costs[preds[i].action] == min_cost)
           preds[i].score = 1;
         else
           preds[i].score = 0;
       }
+      // explore uniformly on support (random tie breaking)
+      CB_EXPLORE::safety(preds, 1.0, /*zeros=*/false);
     }
     else // elimination variant
     {
