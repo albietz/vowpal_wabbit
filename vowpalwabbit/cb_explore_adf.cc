@@ -48,6 +48,7 @@ struct cb_explore_adf
   float lambda;
   uint64_t offset;
   bool greedify;
+  bool randomtie;
   float agree_c0;
   bool regcbopt; // use optimistic variant of RegCB
   float c0;
@@ -69,11 +70,18 @@ struct cb_explore_adf
 
   v_array<COST_SENSITIVE::label> prepped_cs_labels;
 
+  // for disagreement
+  std::vector<float> disagree_weights;
   std::vector<bool> explored_actions;
 
+  // for random tie breaking
+  std::set<uint32_t> tied_actions;
+
+  // for RegCB
   std::vector<float> min_costs;
   std::vector<float> max_costs;
 
+  // for backing up cb example data when computing sensitivities
   std::vector<ACTION_SCORE::action_scores> ex_as;
   std::vector<v_array<CB::cb_class>> ex_costs;
 };
@@ -140,47 +148,69 @@ void get_disagree_weights_cs(std::vector<float>& weights, cb_explore_adf& data, 
   sensitivities.resize(num_actions);
 
   for (auto ex : examples)
-  { ex_as.push_back(ex->pred.a_s);
+  {
+    ex_as.push_back(ex->pred.a_s);
     ex_costs.push_back(ex->l.cb.costs);
   }
-  float min_score = FLT_MAX;
-  float max_score = -FLT_MAX;
+  const float min_score = data.all->sd->min_cb_cost;
+  const float max_score = data.all->sd->max_cb_cost;
   for (auto as : ex_as[0])
-  { if (as.score < min_score) min_score = as.score;
-    if (as.score > max_score) max_score = as.score;
+  {
     // set regressor prediction
-    examples[shared + as.action]->pred.scalar = as.score;
+    // examples[shared + as.action]->pred.scalar = as.score;
+    examples[shared + as.action]->pred.scalar = min(max_score, max(min_score, as.score));
   }
-  min_score = data.all->sd->min_cb_cost; //TODO(alberto): adapt to observed costs somehow
-  max_score = data.all->sd->max_cb_cost;
   // cout << min_score << " " << max_score << endl;
 
   // compute sensitivities
   for (size_t a = 0; a < num_actions; ++a)
-  { example* ec = examples[shared + a];
+  {
+    example* ec = examples[shared + a];
     ec->l.simple.label = min_score;
-    sensitivities[a].first = base.sensitivity(*ec);
+    if (ec->l.simple.label == ec->pred.scalar)
+      sensitivities[a].first = 0;
+    else
+      sensitivities[a].first = base.sensitivity(*ec);
+    // cout << "min: " << ec->pred.scalar << " -> " << ec->l.simple.label << " "
+    //      << sensitivities[a].first << ", ";
     ec->l.simple.label = max_score;
-    sensitivities[a].second = base.sensitivity(*ec);
+    if (ec->l.simple.label == ec->pred.scalar)
+      sensitivities[a].second = 0;
+    else
+      sensitivities[a].second = base.sensitivity(*ec);
+    // cout << "max: " << ec->pred.scalar << " -> " << ec->l.simple.label << " "
+    //      << sensitivities[a].second << ", ";
   }
 
   // compute importance weights
   weights.resize(num_actions);
   for (size_t a_ref = 0; a_ref < num_actions; ++a_ref)
-  { float max_weight = -FLT_MAX;
-    float s = sensitivities[a_ref].first;
+  {
+    float max_weight = -FLT_MAX;
+    float s_ref = sensitivities[a_ref].first;
     float y = examples[shared + a_ref]->pred.scalar;
     for (size_t a = 0; a < num_actions; ++a)
-    { if (a == a_ref) continue;
-      float w = (y - examples[shared + a]->pred.scalar) / (s + sensitivities[a].second);
+    {
+      if (a == a_ref) continue;
+      float s = sensitivities[a].second;
+      float w;
+      if (y <= examples[shared + a]->pred.scalar)
+        w = 0;
+      else if (s + s_ref == 0)
+        w = FLT_MAX;
+      else
+        w = (y - examples[shared + a]->pred.scalar) / (s_ref + s);
       if (w > max_weight) max_weight = w;
     }
-    weights[a_ref] = max_weight * max_score / data.counter;
+    // cout << max_weight << ", ";
+    weights[a_ref] = max_weight * (max_score - min_score) / data.counter;
   }
+  // cout << endl;
 
   // reset examples
   for (size_t i = 0; i < examples.size(); ++i)
-  { examples[i]->pred.a_s = ex_as[i];
+  {
+    examples[i]->pred.a_s = ex_as[i];
     examples[i]->l.cb.costs = ex_costs[i];
   }
 }
@@ -198,13 +228,13 @@ void get_disagree_weights_mtr(std::vector<float>& weights, cb_explore_adf& data,
   { ex_as.push_back(ex->pred.a_s);
     ex_costs.push_back(ex->l.cb.costs);
   }
-  float min_score = FLT_MAX;
+  const float min_score = data.all->sd->min_cb_cost;
+  const float max_score = data.all->sd->max_cb_cost;
   for (auto as : ex_as[0])
-  { if (as.score < min_score) min_score = as.score;
+  {
     // set regressor prediction
     examples[shared + as.action]->pred.scalar = as.score;
   }
-  min_score = data.all->sd->min_cb_cost; //TODO(alberto): adapt to observed costs somehow
 
   // compute importance weights
   weights.resize(num_actions);
@@ -212,7 +242,7 @@ void get_disagree_weights_mtr(std::vector<float>& weights, cb_explore_adf& data,
   { example* ec = examples[shared + a_ref];
     ec->l.simple.label = min_score;
     weights[a_ref] = (examples[shared + a_ref]->pred.scalar - min_score) / base.sensitivity(*ec);
-    weights[a_ref] *= examples[shared + a_ref]->pred.scalar / data.counter;
+    weights[a_ref] *= (max_score - min_score) / data.counter;
   }
 
   // reset examples
@@ -335,6 +365,18 @@ void get_cost_ranges(std::vector<float> &min_costs,
   }
 }
 
+void fill_tied(cb_explore_adf& data, v_array<action_score>& preds)
+{
+  if (!data.randomtie)
+    return;
+
+  data.tied_actions.clear();
+  for (size_t i = 0; i < preds.size(); ++i)
+    if (i == 0 || preds[i].score == preds[0].score)
+      data.tied_actions.insert(preds[i].action);
+  // cout << "tied: " << data.tied_actions.size() << endl;
+}
+
 template <bool is_learn>
 void predict_or_learn_first(cb_explore_adf& data, base_learner& base, v_array<example*>& examples)
 {
@@ -407,15 +449,19 @@ void predict_or_learn_greedy(cb_explore_adf& data, base_learner& base, v_array<e
   else
     multiline_learn_or_predict<false>(base, examples, data.offset);
   
-  static std::vector<float> weights;
-  if (data.nounifagree && !is_learn)
-    get_disagree_weights(weights, data, base, examples);
-
   v_array<action_score>& preds = examples[0]->pred.a_s;
   uint32_t num_actions = (uint32_t)preds.size();
   ++data.counter;
+  if (data.randomtie)
+  {
+    fill_tied(data, preds);
+  }
+
   if (data.nounifagree && !is_learn)
   {
+    std::vector<float>& weights = data.disagree_weights;
+    get_disagree_weights(weights, data, base, examples);
+
     size_t support_size = 0;
     // const float threshold = data.agree_c0 / (float)sqrt(data.counter * num_actions);
     if (data.epsilon == 0)
@@ -432,7 +478,9 @@ void predict_or_learn_greedy(cb_explore_adf& data, base_learner& base, v_array<e
       if (weights[preds[i].action] > threshold)
       {
         preds[i].score = 0;
-        if (i == 0)  // greedy action
+        if (i == 0 ||
+            (data.randomtie &&
+             data.tied_actions.count(preds[i].action) > 0)) // greedy action(s)
         {
           explored_actions[preds[i].action] = true;
         }
@@ -452,6 +500,8 @@ void predict_or_learn_greedy(cb_explore_adf& data, base_learner& base, v_array<e
     }
     // cout << endl;
     // cout << "(disagreeing actions)" << &explored_actions << endl;
+
+    // exploration mass
     float prob = data.epsilon / num_actions;
     float expl_mass = 0.f;
     for (size_t i = 0; i < num_actions; ++i)
@@ -462,14 +512,30 @@ void predict_or_learn_greedy(cb_explore_adf& data, base_learner& base, v_array<e
         expl_mass += prob;
       }
     }
-    preds[0].score += 1 - expl_mass;
+
+    // greedy mass
+    if (data.randomtie)
+    {
+      for (size_t i = 0; i < num_actions; ++i)
+        if (data.tied_actions.count(preds[i].action) > 0)
+          preds[i].score += (1.f - expl_mass) / data.tied_actions.size();
+    }
+    else
+      preds[0].score += 1 - expl_mass;
   }
   else
   {
     float prob = data.epsilon/(float)num_actions;
     for (size_t i = 0; i < num_actions; i++)
       preds[i].score = prob;
-    preds[0].score += 1.f - data.epsilon;
+    if (data.randomtie)
+    {
+      for (size_t i = 0; i < num_actions; ++i)
+        if (data.tied_actions.count(preds[i].action) > 0)
+          preds[i].score += (1.f - data.epsilon) / data.tied_actions.size();
+    }
+    else
+      preds[0].score += 1.f - data.epsilon;
   }
 }
 
@@ -507,13 +573,13 @@ void predict_or_learn_regcb(cb_explore_adf& data, base_learner& base, v_array<ex
     get_cost_ranges(data.min_costs, data.max_costs, delta, data, base, examples,
                     /*min_only=*/data.regcbopt);
 
-    for (size_t i = 0; i < num_actions; ++i)
+    /*for (size_t i = 0; i < num_actions; ++i)
     {
-      // cout << "(" << data.min_costs[preds[i].action] << ", "
-      //   << preds[i].score << ", " << (data.regcbopt ? 0. : data.max_costs[preds[i].action])
-      //   << ") ";
+      cout << "(" << data.min_costs[preds[i].action] << ", "
+        << preds[i].score << ", " << (data.regcbopt ? 0. : data.max_costs[preds[i].action])
+        << ") ";
     }
-    // cout << endl;
+    cout << endl;*/
 
     if (data.regcbopt) // optimistic variant
     {
@@ -529,7 +595,8 @@ void predict_or_learn_regcb(cb_explore_adf& data, base_learner& base, v_array<ex
       }
       for (size_t i = 0; i < preds.size(); ++i)
       {
-        if (preds[i].action == a_opt || data.min_costs[preds[i].action] == min_cost)
+        if (preds[i].action == a_opt ||
+            (data.randomtie && data.min_costs[preds[i].action] == min_cost))
           preds[i].score = 1;
         else
           preds[i].score = 0;
@@ -590,7 +657,14 @@ void predict_or_learn_bag(cb_explore_adf& data, base_learner& base, v_array<exam
     else
       multiline_learn_or_predict<false>(base, examples, data.offset, id);
     assert(preds.size() == num_actions);
-    data.action_probs[preds[0].action].score += prob;
+    if (data.randomtie)
+    {
+      fill_tied(data, preds);
+      for (uint32_t a : data.tied_actions)
+        data.action_probs[a].score += prob / data.tied_actions.size();
+    }
+    else
+      data.action_probs[preds[0].action].score += prob;
     if (is_learn && !test_sequence)
       for (uint32_t j = 1; j < count; j++)
         multiline_learn_or_predict<true>(base, examples, data.offset, id);
@@ -638,7 +712,14 @@ void predict_or_learn_cover(cb_explore_adf& data, base_learner& base, v_array<ex
   for(uint32_t i = 0; i < num_actions; i++)
     probs.push_back({i,0.});
 
-  probs[preds[0].action].score += additive_probability;
+  if (false && data.randomtie)
+  {
+    fill_tied(data, preds);
+    for (uint32_t a : data.tied_actions)
+      probs[a].score += additive_probability / data.tied_actions.size();
+  }
+  else
+    probs[preds[0].action].score += additive_probability;
 
   const uint32_t shared = CB::ec_is_example_header(*examples[0]) ? 1 : 0;
 
@@ -661,12 +742,28 @@ void predict_or_learn_cover(cb_explore_adf& data, base_learner& base, v_array<ex
     else
       GEN_CS::call_cs_ldf<false>(*(data.cs_ldf_learner), examples, data.cb_labels, data.cs_labels, data.prepped_cs_labels, data.offset, i+1);
 
-    uint32_t action = preds[0].action;
-    if (probs[action].score < min_prob)
-      norm += max(0, additive_probability - (min_prob - probs[action].score));
+    if (false && data.randomtie)
+    {
+      fill_tied(data, preds);
+      const float add_prob = additive_probability / data.tied_actions.size();
+      for (uint32_t a : data.tied_actions)
+      {
+        if (probs[a].score < min_prob)
+          norm += max(0, add_prob - (min_prob - probs[a].score));
+        else
+          norm += add_prob;
+        probs[a].score += add_prob;
+      }
+    }
     else
-      norm += additive_probability;
-    probs[action].score += additive_probability;
+    {
+      uint32_t action = preds[0].action;
+      if (probs[action].score < min_prob)
+        norm += max(0, additive_probability - (min_prob - probs[action].score));
+      else
+        norm += additive_probability;
+      probs[action].score += additive_probability;
+    }
   }
 
   if (data.nounifagree)
@@ -1024,6 +1121,7 @@ base_learner* cb_explore_adf_setup(vw& all)
   ("mellowness", po::value<float>(), "RegCB mellowness parameter c_0. Default 0.1")
   ("softmax", "softmax exploration")
   ("greedify", "always update first policy once in bagging")
+  ("randomtie", "explore uniformly over random ties")
   ("lambda", po::value<float>(), "parameter for softmax");
   add_options(all);
 
@@ -1040,6 +1138,9 @@ base_learner* cb_explore_adf_setup(vw& all)
   size_t problem_multiplier = 1;
   char type_string[10];
 
+  data.randomtie = vm.count("randomtie") > 0;
+  if (data.randomtie)
+    *all.file_options << " --randomtie";
   if (vm.count("epsilon"))
   {
     data.epsilon = vm["epsilon"].as<float>();
