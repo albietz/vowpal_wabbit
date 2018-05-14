@@ -262,7 +262,7 @@ void get_disagree_weights(std::vector<float>& weights, cb_explore_adf& data, bas
 // TODO: same as cs_active.cc, move to shared place
 float binary_search(float fhat, float delta, float sens, float tol=1e-6)
 {
-  const float maxw = min(fhat / sens, FLT_MAX);
+  const float maxw = min(fabs(fhat) / sens, FLT_MAX);
 
   if (maxw * fhat * fhat <= delta)
     return maxw;
@@ -320,7 +320,7 @@ void get_cost_ranges(std::vector<float> &min_costs,
   for (size_t a = 0; a < num_actions; ++a)
   {
     example* ec = examples[shared + a];
-    ec->l.simple.label = cmin;
+    ec->l.simple.label = cmin - 1;
     float sens = base.sensitivity(*ec);
     // cout << sens << endl;
     float w = 0; // importance weight
@@ -329,17 +329,17 @@ void get_cost_ranges(std::vector<float> &min_costs,
       min_costs[a] = cmin;
     else
     {
-      w = binary_search(ec->pred.scalar - cmin, delta, sens);
+      w = binary_search(ec->pred.scalar - cmin - 1, delta, sens);
       min_costs[a] = max(ec->pred.scalar - sens * w, cmin);
       if (min_costs[a] > cmax)
         min_costs[a] = cmax;
     }
-      // cout << ec->pred.scalar << " " << sens << " " << w << " " << min_costs[a]
-      //      << " | ";
+      cout << ec->pred.scalar << " " << sens << " " << w << " " << min_costs[a]
+           << " | ";
 
     if (!min_only)
     {
-      ec->l.simple.label = cmax;
+      ec->l.simple.label = cmax + 1;
       sens = base.sensitivity(*ec);
     // cout << sens << endl;
       if (ec->pred.scalar > cmax || nanpattern(sens) || infpattern(sens))
@@ -348,7 +348,7 @@ void get_cost_ranges(std::vector<float> &min_costs,
       }
       else
       {
-        w = binary_search(cmax - ec->pred.scalar, delta, sens);
+        w = binary_search(cmax + 1 - ec->pred.scalar, delta, sens);
         max_costs[a] = min(ec->pred.scalar + sens * w, cmax);
         if (max_costs[a] < cmin)
           max_costs[a] = cmin;
@@ -356,7 +356,7 @@ void get_cost_ranges(std::vector<float> &min_costs,
       // cout << sens << " " << w << " " << max_costs[a] << ", ";
     }
   }
-  // cout << endl;
+  cout << endl;
 
   // reset cb example data
   for (size_t i = 0; i < examples.size(); ++i)
@@ -573,13 +573,13 @@ void predict_or_learn_regcb(cb_explore_adf& data, base_learner& base, v_array<ex
     get_cost_ranges(data.min_costs, data.max_costs, delta, data, base, examples,
                     /*min_only=*/data.regcbopt);
 
-    /*for (size_t i = 0; i < num_actions; ++i)
+    for (size_t i = 0; i < num_actions; ++i)
     {
       cout << "(" << data.min_costs[preds[i].action] << ", "
         << preds[i].score << ", " << (data.regcbopt ? 0. : data.max_costs[preds[i].action])
         << ") ";
     }
-    cout << endl;*/
+    cout << endl;
 
     if (data.regcbopt) // optimistic variant
     {
